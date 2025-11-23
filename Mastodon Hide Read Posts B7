@@ -1,0 +1,139 @@
+// ==UserScript==
+// @name         Mastodon Hide Read Posts B7 (ChatGPT)
+// @namespace    http://tampermonkey.net/
+// @version      7.0
+// @description  Hide posts after reading, persistent storage, toggle button in drawer (compact, classic Mastodon)
+// @match        https://tilde.zone/*
+// @match        https://mastodon.ml/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const HIDE_DELAY_MS = 1000;
+    const STORAGE_KEY_READ = 'gm-read-posts';
+    const STORAGE_KEY_ENABLED = 'gm-hide-enabled';
+    const MAX_IDS = 1000;
+    const HIDDEN_CLASS = 'gm-post-hidden';
+
+    let hidingEnabled = localStorage.getItem(STORAGE_KEY_ENABLED) === 'true';
+    let readSet = new Set();
+    try { readSet = new Set(JSON.parse(localStorage.getItem(STORAGE_KEY_READ) || '[]')); }
+    catch { readSet = new Set(); }
+
+    const visibilityTimers = new Map();
+    const readFlags = new WeakMap();
+
+    const observer = new IntersectionObserver(handleIntersect, { threshold: 0.01 });
+
+    function saveReadSet() {
+        while (readSet.size > MAX_IDS) {
+            const arr = [...readSet];
+            if (arr.length > 0) readSet.delete(arr.shift());
+        }
+        localStorage.setItem(STORAGE_KEY_READ, JSON.stringify([...readSet]));
+    }
+
+    function handleIntersect(entries) {
+        for (const entry of entries) {
+            const article = entry.target;
+            const id = article.getAttribute('data-id');
+            if (!id) continue;
+
+            if (entry.isIntersecting) {
+                if (!readFlags.get(article) && !visibilityTimers.has(article)) {
+                    const t = setTimeout(() => {
+                        readFlags.set(article, true);
+                        visibilityTimers.delete(article);
+                    }, HIDE_DELAY_MS);
+                    visibilityTimers.set(article, t);
+                }
+            } else {
+                const t = visibilityTimers.get(article);
+                if (t) { clearTimeout(t); visibilityTimers.delete(article); }
+                if (readFlags.get(article) && hidingEnabled) hideArticle(article, id);
+            }
+        }
+    }
+
+    function hideArticle(article, id) {
+        if (!hidingEnabled) return;
+        if (!readSet.has(id)) { readSet.add(id); saveReadSet(); }
+        article.classList.add(HIDDEN_CLASS);
+        article.style.display = 'none';
+    }
+
+    function showAllArticles() {
+        document.querySelectorAll('article.' + HIDDEN_CLASS).forEach(a => {
+            a.classList.remove(HIDDEN_CLASS);
+            a.style.removeProperty('display');
+        });
+    }
+
+    function observeArticle(article) {
+        if (!article.__gmObserved) {
+            observer.observe(article);
+            article.__gmObserved = true;
+            const id = article.getAttribute('data-id');
+            if (readSet.has(id) && hidingEnabled) hideArticle(article, id);
+        }
+    }
+
+    function processPosts(root=document) {
+        root.querySelectorAll('article[data-id]').forEach(observeArticle);
+    }
+
+    const feedObserver = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            m.addedNodes.forEach(node => {
+                if (node.nodeType !== Node.ELEMENT_NODE) return;
+                if (node.matches && node.matches('article[data-id]')) observeArticle(node);
+                if (node.querySelectorAll) processPosts(node);
+            });
+        }
+    });
+    feedObserver.observe(document.body, { childList: true, subtree: true });
+
+    const style = document.createElement('style');
+    style.textContent = `.${HIDDEN_CLASS} { display: none !important; }`;
+    document.head.appendChild(style);
+
+    function addHideReadButton() {
+        const drawerTabs = document.querySelectorAll('.drawer__tab');
+        const signOutBtn = Array.from(drawerTabs).find(a => a.getAttribute('href') === '/auth/sign_out');
+        if (!signOutBtn || document.querySelector('#gm-hide-btn')) return;
+
+        const btn = document.createElement('a');
+        btn.href = '#';
+        btn.id = 'gm-hide-btn';
+        btn.className = 'drawer__tab';
+        btn.title = 'Toggle hide-read mode';
+
+        function renderIcon() {
+            btn.textContent = hidingEnabled ? '🙈' : '👀';
+        }
+        renderIcon();
+
+        btn.addEventListener('click', e => {
+            e.preventDefault();
+            hidingEnabled = !hidingEnabled;
+            localStorage.setItem(STORAGE_KEY_ENABLED, hidingEnabled);
+            renderIcon();
+            if (!hidingEnabled) showAllArticles();
+            else processPosts();
+        });
+
+        signOutBtn.insertAdjacentElement('afterend', btn);
+    }
+
+    const drawerObserver = new MutationObserver(() => addHideReadButton());
+    drawerObserver.observe(document.body, { childList: true, subtree: true });
+
+    setTimeout(addHideReadButton, 500);
+    setTimeout(addHideReadButton, 2000);
+    setTimeout(addHideReadButton, 5000);
+
+    setTimeout(processPosts, 1000);
+})();
